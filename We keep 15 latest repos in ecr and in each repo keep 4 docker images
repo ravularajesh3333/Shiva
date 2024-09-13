@@ -1,0 +1,84 @@
+pipeline {
+    agent any
+    environment {
+        AWS_ACCESS_KEY_ID = 'AKIAVGMMERS6JGWLEXIE'
+        AWS_SECRET_ACCESS_KEY = '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'
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID = '357313055932'
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    }
+    stages {
+
+        stage('Create ecr repos') {
+            steps {
+                script {
+                    def currentDate = new Date().format('yyyy-MM-dd')
+                    def repoExists = sh(
+                        script: "aws ecr describe-repositories --repository-names ${currentDate} --region ${AWS_REGION}",
+                        returnStatus: true
+                    ) == 0
+
+                    if (!repoExists) {
+                        sh "aws ecr create-repository --repository-name ${currentDate} --region ${AWS_REGION}"
+                    } else {
+                        echo "Repository ${currentDate} already exists. Skipping creation."
+                    }
+                }
+            }
+        }
+
+        stage('Build and push docker image') {
+            steps {
+                script {
+                    def currentDate = new Date().format('yyyy-MM-dd')
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}"
+                    sh "docker build -t ${ECR_REGISTRY}/${currentDate}:java1 -f /var/lib/jenkins/Dockerfile ."
+                    sh "docker push ${ECR_REGISTRY}/${currentDate}:java1"
+                }
+            }
+        }
+
+        stage('Clean up old Repositories') {
+            steps {
+               script {
+                   def repos = sh(returnStdout: true, script: "aws ecr describe-repositories --region ${AWS_REGION} --query 'repositories[].repositoryName' --output text").split()
+                   def sortedRepos = repos.sort()
+                   def recentRepos = sortedRepos.size() <= 15 ? sortedRepos : sortedRepos[-15..-1]
+                   def oldRepos = repos - recentRepos
+                   oldRepos.each { repo ->
+                      sh "aws ecr delete-repository --repository-name ${repo} --region ${AWS_REGION} --force"
+                   }
+                }
+            }
+        }
+
+        stage('We keep only 4 images in each repository') {
+            steps {
+                script {
+                    def currentDate = new Date().format('yyyy-MM-dd')
+
+                    // Fetch and sort the images based on the pushed date using a shell script
+                    def imageDetails = sh(returnStdout: true, script: """
+                        aws ecr describe-images \
+                        --repository-name ${currentDate} \
+                        --region ${AWS_REGION} \
+                        --query 'imageDetails[*].[imageDigest,imagePushedAt]' \
+                        --output json | jq -c 'sort_by(.[1])' 
+                    """).trim()
+
+                    // Parse the JSON output
+                    def images = readJSON(text: imageDetails)
+
+                    // If there are more than 4 images, delete the older ones
+                    if (images.size() > 4) {
+                        def oldImages = images[0..-5].collect { it[0] } // Get the image digests of the older images
+
+                        oldImages.each { imageDigest ->
+                            sh "aws ecr batch-delete-image --repository-name ${currentDate} --image-ids imageDigest=${imageDigest} --region ${AWS_REGION}"
+                        }
+                    }
+                }
+            }
+       }
+    }
+}
