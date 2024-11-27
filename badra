@@ -14,7 +14,7 @@ pipeline {
         stage('Extract Git Tag') {
             steps {
                 script {
-                    // Fetch the Git tag from the webhook payload
+                    // Fetch the Git tags from the webhook payload
                     def ref = "${env.GIT_REF}"
                     if (!ref.startsWith('refs/tags/')) {
                         error "This build is not triggered by a tag. Exiting."
